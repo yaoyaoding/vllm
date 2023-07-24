@@ -91,7 +91,7 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
     # Additional parameters supported by vLLM
     top_k: Optional[int] = -1
-    ignore_eos: Optional[bool] = False
+    ignore_eos: Optional[bool] = True
     use_beam_search: Optional[bool] = False
 
 
