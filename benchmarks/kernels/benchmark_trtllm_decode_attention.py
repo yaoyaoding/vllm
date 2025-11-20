@@ -29,7 +29,8 @@ def benchmark_decode(
     dtype: torch.dtype,
     quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
-    max_seq_len: int,
+    max_q_len: int,
+    max_kv_len: int,
     num_heads: tuple[int, int] = (64, 8),
     head_size: int = 128,
     kv_layout: str = "HND",
@@ -61,18 +62,27 @@ def benchmark_decode(
     else:
         raise ValueError(f"Invalid kv_layout: {kv_layout}")
 
+    q_lens = torch.randint(1, max_q_len, (batch_size,), dtype=torch.int32)
+    q_lens[-1] = max_q_len
+    q_indptr = torch.cat(
+        [
+            torch.tensor([0], dtype=torch.int32),
+            torch.cumsum(q_lens, dim=0, dtype=torch.int32),
+        ]
+    )
+
     # Always using 1.0 scale to reflect the real perf in benchmarking
     q_scale = 1.0
-    ref_query = torch.randn(batch_size, num_qo_heads, head_size, dtype=dtype)
+    ref_query = torch.randn(torch.sum(q_lens).item(), num_qo_heads, head_size, dtype=dtype)
     if q_quant_dtype == FP8_DTYPE:
         query, _ = to_float8(ref_query)
     else:
         query = ref_query
 
-    kv_lens = torch.randint(1, max_seq_len, (batch_size,), dtype=torch.int32)
-    kv_lens[-1] = max_seq_len
+    kv_lens = torch.randint(1, max_kv_len, (batch_size,), dtype=torch.int32)
+    kv_lens[-1] = max_kv_len
 
-    seq_lens = kv_lens
+    seq_lens = kv_lens + q_lens
     max_seq_len = torch.max(seq_lens).item()
 
     # Always using 1.0 scale to reflect the real perf in benchmarking
@@ -105,25 +115,6 @@ def benchmark_decode(
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
     workspace_buffer = torch.zeros(1024 * 1024 * 1024, dtype=torch.int8)
-
-    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-        workspace_buffer,
-        kv_layout,
-        use_tensor_cores=True,
-    )
-    wrapper.plan(
-        kv_indptr,
-        kv_indices,
-        kv_last_page_lens,
-        num_qo_heads,
-        num_kv_heads,
-        head_size,
-        block_size,
-        "NONE",
-        sm_scale=sm_scale,
-        q_data_type=dtype,
-        kv_data_type=dtype,
-    )
 
     def time_fn(fn, warmup=10, trials=20):
         torch.cuda.synchronize()
@@ -159,12 +150,21 @@ def benchmark_decode(
         output_trtllm = torch.empty(query.shape, dtype=o_quant_dtype)
 
     def baseline_decode():
-        return wrapper.run(
-            ref_query,
-            ref_kv_cache,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            out=output_baseline,
+        return flashinfer.prefill.trtllm_batch_context_with_kv_cache(
+            query=query,
+            kv_cache=kv_cache,
+            workspace_buffer=workspace_buffer,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            max_q_len=max_q_len,
+            max_kv_len=max_kv_len,
+            bmm1_scale=q_scale * k_scale * sm_scale,
+            bmm2_scale=v_scale / o_scale,
+            batch_size=batch_size,
+            cum_seq_lens_q=q_indptr,
+            cum_seq_lens_kv=kv_indptr,
+            o_sf_scale=o_sf_scale,
+            out=output_trtllm,
         )
 
     def trtllm_decode():
@@ -174,9 +174,13 @@ def benchmark_decode(
             workspace_buffer=workspace_buffer,
             block_tables=block_tables,
             seq_lens=seq_lens,
-            max_seq_len=max_seq_len,
+            max_q_len=max_q_len,
+            max_kv_len=max_kv_len,
             bmm1_scale=q_scale * k_scale * sm_scale,
             bmm2_scale=v_scale / o_scale,
+            batch_size=batch_size,
+            cum_seq_lens_q=q_indptr,
+            cum_seq_lens_kv=kv_indptr,
             o_sf_scale=o_sf_scale,
             out=output_trtllm,
         )
@@ -188,7 +192,7 @@ def benchmark_decode(
     speedup_percent = (baseline_mean - trtllm_mean) / baseline_mean
 
     print(
-        f"\t{batch_size}\t{max_seq_len}\t{trtllm_mean:.3f}\t{trtllm_std.item():.3f}"
+        f"\t{batch_size}\t{max_q_len}\t{max_seq_len}\t{trtllm_mean:.3f}\t{trtllm_std.item():.3f}"
         f"\t{baseline_mean:.3f}\t{baseline_std.item():.3f}\t{speedup_percent:.3f}"
     )
 
@@ -206,7 +210,7 @@ def benchmark_decode(
         "block_size": block_size,
         "num_kv_heads": num_kv_heads,
         "head_size": head_size,
-        "max_seq_len": max_seq_len,
+        "max_seq_len": max_kv_len,
     }
 
 
@@ -247,18 +251,29 @@ def write_results_to_csv(results, filename=None):
 
 
 if __name__ == "__main__":
-    batch_sizes = [1, 4, 8, 16, 32, 64, 128, 256]
-    max_seq_lens = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    batch_sizes = [
+        # 1, 4, 
+        8, 
+        # 16, 32, 64, 128, 256
+    ]
+    max_q_lens = [
+        # 4, 
+        8, 
+    ]
+    max_kv_lens = [
+        1024, 
+        # 2048, 4096, 8192, 16384, 32768, 65536, 131072
+    ]
     all_results = []
 
     dtype = torch.bfloat16
     quant_dtypes = [
         # (q_quant_dtype, kv_quant_dtype, o_quant_dtype)
         (None, None, None),
-        (None, FP8_DTYPE, None),
-        (FP8_DTYPE, FP8_DTYPE, None),
-        (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
-        (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
+        # (None, FP8_DTYPE, None),
+        # (FP8_DTYPE, FP8_DTYPE, None),
+        # (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
+        # (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
     ]
 
     for quant_dtype in quant_dtypes:
@@ -273,18 +288,20 @@ if __name__ == "__main__":
             f"output_dtype: {o_quant_dtype}"
         )
         print(
-            "\tbatch_size\tmax_seq_len\ttrtllm_mean\ttrtllm_std\tbaseline_mean\t"
+            "\tbatch_size\tmax_q_len\tmax_seq_len\ttrtllm_mean\ttrtllm_std\tbaseline_mean\t"
             "baseline_std\tspeedup_percent"
         )
-        for max_seq_len in max_seq_lens:
-            for bs in batch_sizes:
-                result = benchmark_decode(
-                    dtype=dtype,
-                    quant_dtypes=quant_dtype,
-                    batch_size=bs,
-                    max_seq_len=max_seq_len,
-                )
-                all_results.append(result)
+        for max_q_len in max_q_lens:
+            for max_kv_len in max_kv_lens:
+                for bs in batch_sizes:
+                    result = benchmark_decode(
+                        dtype=dtype,
+                        quant_dtypes=quant_dtype,
+                        batch_size=bs,
+                        max_q_len=max_q_len,
+                        max_kv_len=max_kv_len,
+                    )
+                    all_results.append(result)
 
     # Write all results to CSV
     write_results_to_csv(all_results)

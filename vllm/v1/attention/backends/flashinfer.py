@@ -1395,7 +1395,7 @@ class FlashInferImpl(AttentionImpl):
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
-                    max_seq_len=attn_metadata.max_seq_len,
+                    max_kv_len=attn_metadata.max_seq_len,
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,

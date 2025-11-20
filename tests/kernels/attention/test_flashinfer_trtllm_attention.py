@@ -41,7 +41,8 @@ QUANT_DTYPES = [
     (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
 ]
 BATCH_SIZE = [4, 12]
-MAX_SEQ_LENS = [(1024, 4096)]
+MAX_SEQ_LENS_FOR_DECODE = [(1, 1024), (8, 4096)]
+MAX_SEQ_LENS_FOR_PREFILL = [(1024, 4096)]
 NUM_HEADS = [(64, 8), (40, 8)]
 HEAD_SIZE = [128]
 KV_LAYOUT = ["HND"]  # currently only HND is supported
@@ -56,7 +57,7 @@ NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 @pytest.mark.parametrize("dtype", DTYPE)
 @pytest.mark.parametrize("quant_dtypes", QUANT_DTYPES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("max_seq_lens", MAX_SEQ_LENS)
+@pytest.mark.parametrize("max_seq_lens", MAX_SEQ_LENS_FOR_DECODE)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZE)
 @pytest.mark.parametrize("kv_layout", KV_LAYOUT)
@@ -86,7 +87,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_quant_dtype = kv_quant_dtype or dtype
     o_quant_dtype = o_quant_dtype or dtype
 
-    _, max_kv_len = max_seq_lens
+    max_q_len, max_kv_len = max_seq_lens
 
     num_qo_heads, num_kv_heads = num_heads
     assert num_qo_heads % num_kv_heads == 0
@@ -101,8 +102,8 @@ def test_flashinfer_trtllm_decode_with_baseline(
     else:
         raise ValueError(f"Invalid kv_layout: {kv_layout}")
 
-    # max_q_len = 1
-    q_lens = torch.ones((batch_size,), dtype=torch.int32)
+    q_lens = torch.randint(1, max_q_len + 1, (batch_size,), dtype=torch.int32)
+    q_lens[-1] = max_q_len
     q_indptr = torch.cat(
         [
             torch.tensor([0], dtype=torch.int32),
@@ -216,9 +217,13 @@ def test_flashinfer_trtllm_decode_with_baseline(
         workspace_buffer=workspace_buffer,
         block_tables=block_tables,
         seq_lens=seq_lens,
-        max_seq_len=max_seq_len,
+        max_q_len=max_q_len,
+        max_kv_len=max_seq_len,
         bmm1_scale=q_scale * k_scale * sm_scale,
         bmm2_scale=v_scale / o_scale,
+        batch_size=batch_size,
+        cum_seq_lens_q=q_indptr,
+        cum_seq_lens_kv=kv_indptr,
         window_left=window_left,
         sinks=sinks,
         o_sf_scale=o_sf_scale_float,
@@ -255,7 +260,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
 @pytest.mark.parametrize("dtype", DTYPE)
 @pytest.mark.parametrize("quant_dtypes", QUANT_DTYPES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("max_seq_lens", MAX_SEQ_LENS)
+@pytest.mark.parametrize("max_seq_lens", MAX_SEQ_LENS_FOR_PREFILL)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZE)
 @pytest.mark.parametrize("kv_layout", KV_LAYOUT)

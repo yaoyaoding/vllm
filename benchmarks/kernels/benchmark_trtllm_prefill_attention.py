@@ -29,7 +29,8 @@ def benchmark_prefill(
     dtype: torch.dtype,
     quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
-    max_seq_len: int,
+    max_q_len: int,
+    max_kv_len: int,
     num_heads: tuple[int, int] = (64, 8),
     head_size: int = 128,
     kv_layout: str = "HND",
@@ -44,8 +45,6 @@ def benchmark_prefill(
     q_quant_dtype = q_quant_dtype or dtype
     kv_quant_dtype = kv_quant_dtype or dtype
     o_quant_dtype = o_quant_dtype or dtype
-
-    max_q_len = max_kv_len = max_seq_len
 
     num_qo_heads, num_kv_heads = num_heads
     assert num_qo_heads % num_kv_heads == 0
@@ -187,7 +186,7 @@ def benchmark_prefill(
             block_tables=block_tables,
             seq_lens=seq_lens,
             max_q_len=max_q_len,
-            max_kv_len=max_seq_len,
+            max_kv_len=max_kv_len,
             bmm1_scale=q_scale * k_scale * sm_scale,
             bmm2_scale=v_scale / o_scale,
             batch_size=batch_size,
@@ -204,7 +203,7 @@ def benchmark_prefill(
     speedup_percent = (baseline_mean - trtllm_mean) / baseline_mean
 
     print(
-        f"\t{batch_size}\t{max_seq_len}\t{trtllm_mean:8.3f}\t{trtllm_std.item():8.3f}"
+        f"\t{batch_size}\t{max_q_len}\t{max_kv_len}\t{trtllm_mean:8.3f}\t{trtllm_std.item():8.3f}"
         f"\t{baseline_mean:8.3f}\t{baseline_std.item():8.3f}\t{speedup_percent:8.3f}"
     )
 
@@ -288,7 +287,7 @@ if __name__ == "__main__":
             f"output_dtype: {o_quant_dtype}"
         )
         print(
-            "\tbatch_size\tmax_seq_len\ttrtllm_mean\ttrtllm_std\tbaseline_mean\t"
+            "\tbatch_size\tmax_q_len\tmax_kv_len\ttrtllm_mean\ttrtllm_std\tbaseline_mean\t"
             "baseline_std\tspeedup_percent"
         )
         for max_seq_len in max_seq_lens:
@@ -297,7 +296,8 @@ if __name__ == "__main__":
                     dtype=dtype,
                     quant_dtypes=quant_dtype,
                     batch_size=bs,
-                    max_seq_len=max_seq_len,
+                    max_q_len=max_seq_len,
+                    max_kv_len=max_seq_len,
                 )
                 all_results.append(result)
 
