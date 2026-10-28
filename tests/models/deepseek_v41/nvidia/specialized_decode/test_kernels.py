@@ -584,10 +584,7 @@ class _Mxfp8Linear(nn.Module):
         self.weight_scale = nn.Parameter(w_s.view(n, k // 32), requires_grad=False)
         kernel = FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearLayerConfig((n, k)))
         kernel.process_weights_after_loading(self)
-        self.quant_method = SimpleNamespace(
-            kernel=kernel,
-            apply=lambda layer, x, bias=None: kernel.apply_weights(layer, x, bias),
-        )
+        self.quant_method = SimpleNamespace(kernel=kernel)
 
     def forward(self, x):
         return self.quant_method.kernel.apply_weights(self, x)
