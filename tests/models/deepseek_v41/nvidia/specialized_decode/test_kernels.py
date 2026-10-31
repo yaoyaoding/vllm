@@ -775,15 +775,17 @@ def test_fp32_index_key_store(ratio):
 # --------------------------------------------------------------- Engram
 
 
-@pytest.mark.parametrize("masked", [False, True])
-def test_engram_wkv_prefetch_matches_inline(masked):
-    """The Engram WKV started on a side stream right after its (slow) host
-    lookup, replayed from a CUDA graph, gives the stock forward's output
+@pytest.mark.parametrize(
+    "cpu_offload,masked", [(True, False), (True, True), (False, False)]
+)
+def test_engram_wkv_prefetch_matches_inline(cpu_offload, masked):
+    """The Engram WKV started on a side stream right after its (slow) inline or
+    host lookup, replayed from a CUDA graph, gives the stock forward's output
     bitwise."""
     from tests.kernels.test_engram import _make_embedding
 
     hc_mult, dim, max_tokens = 4, 256, 16
-    table = _make_embedding(cpu_offload=True)
+    table = _make_embedding(cpu_offload=cpu_offload)
     lookup = table.lookup
 
     def slow_lookup(indices, out, background=False):
